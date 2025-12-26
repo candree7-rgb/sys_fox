@@ -271,6 +271,79 @@ class TradeEngine:
             self.log.error(f"❌ Bybit place_order FAILED for {symbol}: {e}")
             return None
 
+    def place_limit_entry(self, sig: Dict[str, Any], trade_id: str) -> Optional[str]:
+        """
+        Place a regular limit order for immediate entry (not conditional).
+
+        Used for webhook signals where the trade is already active and we want
+        to enter at the signal's entry price.
+        """
+        symbol = sig["symbol"]
+        side = "Sell" if sig["side"] == "sell" else "Buy"
+        entry_price = float(sig.get("entry") or sig.get("trigger"))
+
+        # Ensure leverage is set
+        try:
+            if not DRY_RUN:
+                self.bybit.set_leverage(CATEGORY, symbol, LEVERAGE)
+        except Exception as e:
+            self.log.warning(f"set_leverage failed for {symbol}: {e}")
+
+        # Check if price is too far from current
+        last = self.bybit.last_price(CATEGORY, symbol)
+        if self._too_far(side, last, entry_price):
+            self.log.info(f"SKIP {symbol} - too far from entry (last={last}, entry={entry_price})")
+            return None
+
+        # Get instrument rules for price/qty rounding
+        rules = self._get_instrument_rules(symbol)
+        tick_size = rules["tick_size"]
+
+        # Round entry price to valid tick
+        limit_price = self._round_price(entry_price, tick_size)
+
+        # Optionally offset limit price for better fill
+        if ENTRY_LIMIT_PRICE_OFFSET_PCT != 0:
+            off = abs(ENTRY_LIMIT_PRICE_OFFSET_PCT) / 100.0
+            if side == "Sell":
+                limit_price = entry_price * (1 + off)
+            else:
+                limit_price = entry_price * (1 - off)
+            limit_price = self._round_price(limit_price, tick_size)
+
+        qty = self.calc_base_qty(symbol, entry_price)
+
+        body = {
+            "category": CATEGORY,
+            "symbol": symbol,
+            "side": side,
+            "orderType": "Limit",
+            "qty": f"{qty:.10f}",
+            "price": f"{limit_price:.10f}",
+            "timeInForce": "GTC",
+            "reduceOnly": False,
+            "closeOnTrigger": False,
+            "orderLinkId": trade_id,
+        }
+
+        if DRY_RUN:
+            self.log.info(f"DRY_RUN LIMIT ENTRY {symbol}: {body}")
+            return "DRY_RUN"
+
+        try:
+            self.log.debug(f"Bybit limit order request: {body}")
+            resp = self.bybit.place_order(body)
+            self.log.debug(f"Bybit limit order response: {resp}")
+            oid = (resp.get("result") or {}).get("orderId")
+            if oid:
+                self.log.info(f"Bybit limit order created: {symbol} @ {limit_price} orderId={oid}")
+            else:
+                self.log.warning(f"Bybit response has no orderId: {resp}")
+            return oid
+        except Exception as e:
+            self.log.error(f"Bybit place_order FAILED for {symbol}: {e}")
+            return None
+
     def cancel_entry(self, symbol: str, order_id: str) -> None:
         body = {"category": CATEGORY, "symbol": symbol, "orderId": order_id}
         if DRY_RUN:
@@ -313,10 +386,16 @@ class TradeEngine:
             return
 
         # ---- Calculate SL price ----
-        sl_pct = INITIAL_SL_PCT / 100.0
-        sl_price = entry * (1 + sl_pct) if side == "Sell" else entry * (1 - sl_pct)
-        sl_price = self._round_price(sl_price, tick_size)
-        self.log.info(f"📍 SL at {INITIAL_SL_PCT}% from entry: {sl_price}")
+        # Use signal's SL if provided, otherwise calculate from INITIAL_SL_PCT
+        signal_sl = trade.get("sl_price")
+        if signal_sl and float(signal_sl) > 0:
+            sl_price = self._round_price(float(signal_sl), tick_size)
+            self.log.info(f"SL from signal: {sl_price}")
+        else:
+            sl_pct = INITIAL_SL_PCT / 100.0
+            sl_price = entry * (1 + sl_pct) if side == "Sell" else entry * (1 - sl_pct)
+            sl_price = self._round_price(sl_price, tick_size)
+            self.log.info(f"SL at {INITIAL_SL_PCT}% from entry: {sl_price}")
 
         tp_prices: List[float] = trade.get("tp_prices") or []
         splits: List[float] = trade.get("tp_splits") or TP_SPLITS

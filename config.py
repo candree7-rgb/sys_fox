@@ -15,9 +15,13 @@ def _get_int(name: str, default: str) -> int:
 def _get_float(name: str, default: str) -> float:
     return float(_get(name, default))
 
-# Discord
+# Discord (legacy - not used in webhook mode)
 DISCORD_TOKEN = _get("DISCORD_TOKEN")
 CHANNEL_ID    = _get("CHANNEL_ID")
+
+# Webhook Server
+WEBHOOK_PORT   = _get_int("PORT", "8080")  # Railway sets PORT env var
+WEBHOOK_SECRET = _get("WEBHOOK_SECRET", "")  # Optional auth secret
 
 # Bybit
 BYBIT_API_KEY    = _get("BYBIT_API_KEY")
@@ -55,16 +59,17 @@ MOVE_SL_TO_BE_ON_TP1 = _get_bool("MOVE_SL_TO_BE_ON_TP1","true")
 INITIAL_SL_PCT = _get_float("INITIAL_SL_PCT","19.0")  # SL distance from entry in %
 
 # TP_SPLITS: percentage of position to close at each TP level
-# Example: 30,30,30 means 90% total, leaving 10% as runner for trailing stop
+# Example: 18,18,18,18,18 means 90% total across 5 TPs, leaving 10% as runner
+# For 3 TPs: 30,30,30 = 90% with 10% runner
 # DO NOT normalize - allow sum < 100% for runner positions
-TP_SPLITS = [float(x) for x in _get("TP_SPLITS","30,30,30").split(",") if x.strip()]
+TP_SPLITS = [float(x) for x in _get("TP_SPLITS","18,18,18,18,18").split(",") if x.strip()]
 if sum(TP_SPLITS) > 100.0:
     # Only normalize if over 100% (user error)
     s = sum(TP_SPLITS)
     TP_SPLITS = [x * 100.0 / s for x in TP_SPLITS]
 
 # Fallback TP distances (% from entry) if signal has no TPs
-FALLBACK_TP_PCT = [float(x) for x in _get("FALLBACK_TP_PCT","0.85,1.65,4.0").split(",") if x.strip()]
+FALLBACK_TP_PCT = [float(x) for x in _get("FALLBACK_TP_PCT","0.5,1.0,1.5,2.5,4.0").split(",") if x.strip()]
 
 TRAIL_AFTER_TP_INDEX = _get_int("TRAIL_AFTER_TP_INDEX","3")  # start trailing when TPn filled
 TRAIL_DISTANCE_PCT   = _get_float("TRAIL_DISTANCE_PCT","2.0")
