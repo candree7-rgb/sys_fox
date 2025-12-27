@@ -80,112 +80,100 @@ def signal_hash(sig: Dict[str, Any]) -> str:
 
 def parse_webhook_signal(data: Dict[str, Any], quote: str = "USDT") -> Optional[Dict[str, Any]]:
     """
-    Parse a webhook signal with Entry + SL + 5 TPs.
+    Parse a webhook signal from Tasker screen-scrape format.
 
-    Flexible parser that tries multiple common field name patterns.
-    Logs the raw data so we can see the exact format in Railway logs.
-
-    Expected structure (we'll adapt after seeing real signals):
-    {
-        "symbol": "BTC" or "BTCUSDT",
-        "side": "long" / "short" / "buy" / "sell",
-        "entry": 42000.0,
-        "sl": 41000.0,
-        "tp1": 43000.0, "tp2": 44000.0, ... "tp5": 47000.0
-    }
+    Format example:
+    - LONG !! / SHORT !!
+    - BATUSDT
+    - Entry price\n0.2143
+    - Stop Loss\n5.26%\n0.2036
+    - Target 1 (tap to copy)\n0.2158
+    - Target 2-5 similarly
     """
     if not data or not isinstance(data, dict):
         return None
 
-    raw_body = data.get("_raw_body", str(data))
-
-    # --- Extract symbol ---
-    symbol = None
-    for key in ["symbol", "pair", "coin", "ticker", "asset", "market"]:
-        if key in data:
-            symbol = str(data[key]).upper().strip()
-            break
-
-    if not symbol:
+    # Get raw body text
+    raw_body = data.get("_raw_body") or data.get("raw") or str(data)
+    if not raw_body or not isinstance(raw_body, str):
         return None
 
-    # Normalize symbol: add quote if missing
-    if not symbol.endswith(quote):
-        base = symbol.replace("USDT", "").replace("PERP", "").replace("/", "")
-        symbol = f"{base}{quote}"
+    text = raw_body
 
-    # --- Extract side ---
+    # --- Extract side (LONG/SHORT) ---
     side = None
-    for key in ["side", "direction", "type", "action", "position"]:
-        if key in data:
-            side_raw = str(data[key]).lower().strip()
-            if side_raw in ("long", "buy", "b", "1"):
-                side = "buy"
-            elif side_raw in ("short", "sell", "s", "-1", "0"):
-                side = "sell"
-            break
+    if re.search(r'LONG\s*!+|LONG\s*\|\s*BUY|🟩.*LONG', text, re.I):
+        side = "buy"
+    elif re.search(r'SHORT\s*!+|SHORT\s*\|\s*SELL|🟥.*SHORT', text, re.I):
+        side = "sell"
 
     if not side:
         return None
 
+    # --- Extract symbol (e.g., BATUSDT, BTCUSDT) ---
+    # Look for standalone symbol pattern: uppercase letters + USDT
+    symbol_match = re.search(r'\b([A-Z0-9]{2,10}USDT)\b', text)
+    if not symbol_match:
+        # Try without USDT suffix
+        symbol_match = re.search(r'(?:^|\n)([A-Z]{2,10})(?:\n|$)', text)
+        if symbol_match:
+            symbol = symbol_match.group(1) + quote
+        else:
+            return None
+    else:
+        symbol = symbol_match.group(1)
+
+    base = symbol.replace(quote, "")
+
     # --- Extract entry price ---
+    # Pattern: "Entry price\n0.2143" or "Entry price,0.2143"
     entry = None
-    for key in ["entry", "entry_price", "entryPrice", "price", "open", "limit", "limitPrice"]:
-        if key in data:
-            try:
-                entry = float(data[key])
-                break
-            except (ValueError, TypeError):
-                pass
+    entry_match = re.search(r'Entry\s*price[,\s]*\n?\s*([0-9]+\.?[0-9]*)', text, re.I)
+    if entry_match:
+        try:
+            entry = float(entry_match.group(1))
+        except ValueError:
+            pass
 
     if not entry or entry <= 0:
         return None
 
     # --- Extract stop loss ---
+    # Pattern: "Stop Loss\n5.26%\n0.2036" - we want the price, not the %
     sl = None
-    for key in ["sl", "stop", "stopLoss", "stop_loss", "stoploss", "SL"]:
-        if key in data:
-            try:
-                sl = float(data[key])
-                break
-            except (ValueError, TypeError):
-                pass
+    # Look for Stop Loss followed by % then the actual price
+    sl_match = re.search(r'Stop\s*Loss[,\s]*\n?\s*[0-9.]+%[,\s]*\n?\s*([0-9]+\.?[0-9]*)', text, re.I)
+    if sl_match:
+        try:
+            sl = float(sl_match.group(1))
+        except ValueError:
+            pass
 
-    # --- Extract take profits (TP1-TP5) ---
+    # --- Extract targets (TP1-TP5) ---
     tps: List[float] = []
 
-    # Try numbered TPs first: tp1, tp2, ..., tp5
+    # Pattern: "Target 1 (tap to copy)\n0.2158" or "Target 1\n0.2158"
     for i in range(1, 6):
-        tp_val = None
-        for key in [f"tp{i}", f"TP{i}", f"tp_{i}", f"take_profit_{i}", f"takeProfit{i}", f"target{i}"]:
-            if key in data:
-                try:
-                    tp_val = float(data[key])
-                    break
-                except (ValueError, TypeError):
-                    pass
-        if tp_val and tp_val > 0:
-            tps.append(tp_val)
-
-    # Fallback: try 'tps' or 'targets' as array
-    if not tps:
-        for key in ["tps", "targets", "take_profits", "takeProfits", "tp", "TP"]:
-            if key in data and isinstance(data[key], (list, tuple)):
-                for v in data[key]:
-                    try:
-                        tps.append(float(v))
-                    except (ValueError, TypeError):
-                        pass
-                break
+        tp_match = re.search(
+            rf'Target\s*{i}\s*(?:\([^)]*\))?[,\s]*\n?\s*([0-9]+\.?[0-9]*)',
+            text, re.I
+        )
+        if tp_match:
+            try:
+                tp_val = float(tp_match.group(1))
+                if tp_val > 0:
+                    tps.append(tp_val)
+            except ValueError:
+                pass
 
     return {
-        "base": symbol.replace(quote, ""),
+        "base": base,
         "symbol": symbol,
         "side": side,
         "entry": entry,
-        "trigger": entry,  # For backward compatibility
+        "trigger": entry,  # For backward compatibility with conditional orders
         "tp_prices": tps,
-        "dca_prices": [],  # No DCAs in new format
+        "dca_prices": [],  # No DCAs in this format
         "sl_price": sl,
         "raw": raw_body,
     }

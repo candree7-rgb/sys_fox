@@ -179,7 +179,9 @@ def main():
                         log.warning(f"Could not parse webhook signal: {raw_signal}")
                         continue
 
-                    log.info(f"Signal parsed: {sig['symbol']} {sig['side'].upper()} entry={sig['entry']}")
+                    log.info(f"Signal parsed: {sig['symbol']} {sig['side'].upper()}")
+                    log.info(f"  Entry: {sig['entry']}, SL: {sig.get('sl_price')}")
+                    log.info(f"  TPs: {sig.get('tp_prices')}")
 
                     sh = signal_hash(sig)
                     seen = set(st.get("seen_signal_hashes", []))
@@ -192,10 +194,10 @@ def main():
                     st["seen_signal_hashes"] = list(seen)[-500:]
 
                     trade_id = f"{sig['symbol']}|{sig['side']}|{int(time.time())}"
-                    log.info(f"Placing limit entry for {sig['symbol']}...")
+                    log.info(f"Placing conditional entry for {sig['symbol']}...")
 
-                    # Use limit entry (not conditional) since trade is immediately active
-                    oid = engine.place_limit_entry(sig, trade_id)
+                    # Use conditional entry to wait for exact entry price
+                    oid = engine.place_conditional_entry(sig, trade_id)
                     if not oid:
                         log.warning(f"Entry order failed for {sig['symbol']}")
                         continue
