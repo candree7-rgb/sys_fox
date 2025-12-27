@@ -195,11 +195,22 @@ class TradeEngine:
         avg  = float(p.get("avgPrice") or 0)
         return size, avg
 
+    def _tp1_already_reached(self, side: str, last: float, tp_prices: list) -> bool:
+        """Check if TP1 has already been reached - signal is too late."""
+        if not tp_prices:
+            return False
+        tp1 = float(tp_prices[0])
+        if side == "Buy":  # LONG: TP1 is above entry, skip if price >= TP1
+            return last >= tp1
+        else:  # SHORT: TP1 is below entry, skip if price <= TP1
+            return last <= tp1
+
     # ---------- core actions ----------
     def place_conditional_entry(self, sig: Dict[str, Any], trade_id: str) -> Optional[str]:
         symbol = sig["symbol"]
         side   = "Sell" if sig["side"] == "sell" else "Buy"
         trigger = float(sig["trigger"])
+        tp_prices = sig.get("tp_prices") or []
 
         # ensure leverage set
         try:
@@ -209,6 +220,13 @@ class TradeEngine:
             self.log.warning(f"set_leverage failed for {symbol}: {e}")
 
         last = self.bybit.last_price(CATEGORY, symbol)
+
+        # Skip if TP1 already reached - signal came too late
+        if self._tp1_already_reached(side, last, tp_prices):
+            tp1 = float(tp_prices[0]) if tp_prices else 0
+            self.log.info(f"SKIP {symbol} – TP1 already reached (last={last}, TP1={tp1})")
+            return None
+
         if self._too_far(side, last, trigger):
             self.log.info(f"SKIP {symbol} – too far past trigger (last={last}, trigger={trigger})")
             return None
